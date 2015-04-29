@@ -141,3 +141,10 @@ class LazyList(object):
                                value_dict=self._value_dict)
             self._data.extend(newdata)
         self._all_loaded = True
+
+
+class ConnectionTimeoutError(LibcloudError):
+
+    def __init__(self, value, driver=None):
+        super(ConnectionTimeoutError, self).__init__(
+            value=value, driver=driver)

@@ -15,13 +15,15 @@
 # limitations under the License.
 
 import os
+import socket
 import sys
 import ssl
 
-from mock import Mock, call
+from mock import Mock, call, patch
+from libcloud.common.types import ConnectionTimeoutError
 
 from libcloud.test import unittest
-from libcloud.common.base import Connection
+from libcloud.common.base import Connection, retry_connection
 from libcloud.common.base import LoggingConnection
 from libcloud.httplib_ssl import LibcloudBaseConnection
 from libcloud.httplib_ssl import LibcloudHTTPConnection
@@ -208,6 +210,7 @@ class ConnectionClassTestCase(unittest.TestCase):
         args, kwargs = con.pre_connect_hook.call_args
         self.assertTrue('cache-busting' in args[0][len(params2)])
 
+    @patch('libcloud.common.base.retry_connection', lambda f: f)
     def test_context_is_reset_after_request_has_finished(self):
         context = {'foo': 'bar'}
 
@@ -277,6 +280,52 @@ class ConnectionClassTestCase(unittest.TestCase):
         # Should use --head for head requests
         cmd = con._log_curl(method='HEAD', url=url, body=body, headers=headers)
         self.assertEqual(cmd, 'curl -i --head --compress http://example.com:80/test/path')
+
+    @retry_connection(sleep=2)
+    def _retry_test_with_sleep(self, exc_class):
+        return exc_class.call()
+
+    @retry_connection(backoff=2)
+    def _retry_test_with_backoff(self, exc_class):
+        return exc_class.call()
+
+    @retry_connection(timeout=2)
+    def _retry_test_with_timeout(self, exc_class):
+        return exc_class.call()
+
+    def test_retry_connection(self):
+        con = Connection()
+        con.connection = Mock()
+        con.connection.request = Mock(side_effect=socket.gaierror)
+
+        self.assertRaises(ConnectionTimeoutError, con.request, '/')
+
+    def test_retry_with_sleep(self):
+        try:
+            self._retry_test_with_sleep(SocketError())
+            self.fail('Expected ConnectionTimeoutError')
+        except ConnectionTimeoutError as exc:
+            self.assertTrue( isinstance(exc,ConnectionTimeoutError))
+
+    def test_retry_with_timeout(self):
+        try:
+            self._retry_test_with_timeout(SocketError())
+            self.fail('Expected ConnectionTimeoutError')
+        except ConnectionTimeoutError as exc:
+            self.assertTrue( isinstance(exc,ConnectionTimeoutError))
+
+    def test_retry_with_backoff(self):
+        try:
+            self._retry_test_with_backoff(SocketError())
+            self.fail('Expected ConnectionTimeoutError')
+        except ConnectionTimeoutError as exc:
+            self.assertTrue( isinstance(exc,ConnectionTimeoutError))
+
+
+class SocketError(object):
+
+    def call(self):
+        raise socket.gaierror('')
 
 if __name__ == '__main__':
     sys.exit(unittest.main())

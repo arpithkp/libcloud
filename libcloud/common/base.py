@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import os
+import logging
+import socket
 import sys
 import ssl
 import copy
@@ -21,6 +23,8 @@ import binascii
 import time
 
 import xml.dom.minidom
+import six
+from libcloud.utils.logging import ExtraLogFormatter
 
 try:
     from lxml import etree as ET
@@ -46,10 +50,36 @@ from libcloud.utils.py3 import b
 
 from libcloud.utils.misc import lowercase_keys
 from libcloud.utils.compression import decompress_data
-from libcloud.common.types import LibcloudError, MalformedResponseError
+from libcloud.common.types import LibcloudError, MalformedResponseError,\
+    ConnectionTimeoutError
 
 from libcloud.httplib_ssl import LibcloudHTTPConnection
 from libcloud.httplib_ssl import LibcloudHTTPSConnection
+
+
+def retry_connection(*dargs, **dkwargs):
+        """
+        Retry calling decorated function.
+        """
+
+        if len(dargs) == 1 and callable(dargs[0]):
+
+            def func_wrapper_simple(func):
+                @six.wraps(func)
+                def func_wrapped(*args, **kwargs):
+                    return RetryConnection().retry_call(func, *args, **kwargs)
+                return func_wrapped
+            return func_wrapper_simple(dargs[0])
+
+        else:
+
+            def func_wrapper(func):
+                @six.wraps(func)
+                def func_wrapped(*args, **kwargs):
+                    return RetryConnection(*dargs, **dkwargs).retry_call(
+                        func, *args, **kwargs)
+                return func_wrapped
+            return func_wrapper
 
 
 class HTTPResponse(httplib.HTTPResponse):
@@ -626,6 +656,7 @@ class Connection(object):
         """
         self.ua.append(token)
 
+    @retry_connection
     def request(self, action, params=None, data=None, headers=None,
                 method='GET', raw=False):
         """
@@ -1055,3 +1086,49 @@ class BaseDriver(object):
         Connection class constructor.
         """
         return {}
+
+
+class RetryConnection(object):
+    """
+    Retry connection class which can be used for common network
+    connection errors.
+    """
+    def __init__(self, timeout=None, sleep=None, backoff=None):
+        """
+        :param    timeout: Timeout in seconds used for retry.
+        :type     timeout: ``int``
+
+        :param    sleep: Sleep time to wait before retry.
+        :type     sleep: ``int``
+
+        :param    backoff: Backoff time used while retry.
+        :type     backoff: ``int``
+        """
+        self.timeout = 300 if timeout is None else timeout
+        self.sleep = 1 if sleep is None else sleep
+        self.backoff = 1 if backoff is None else backoff
+
+    def retry_call(self, func, *args, **kwargs):
+        """
+        Decorator function that retries on common network connection errors.
+        """
+        attempts = 0
+        bsleep = self.sleep
+        _start_time = time.time()
+        while True:
+            try:
+                return func(*args, **kwargs)
+            except (socket.error,  socket.gaierror, httplib.NotConnected,
+                    httplib.ImproperConnectionState) as exc:
+                if self._is_timed_out(_start_time):
+                    raise ConnectionTimeoutError(
+                        'Connection timeout after {attempts} attempts'
+                        ' exception with exception {exc}'.format(
+                            attempts=attempts, exc=exc))
+                bsleep += self.backoff
+                attempts += 1
+                time.sleep(bsleep)
+
+    def _is_timed_out(self, start_time):
+        delay_from_start_time = int(time.time() - start_time)
+        return delay_from_start_time >= self.timeout
